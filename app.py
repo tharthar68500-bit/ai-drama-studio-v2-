@@ -1137,3 +1137,504 @@ st.caption(
     "🎬 Stage 1 — "
     "Notebook → Story → Volume → Scenes → Dialogue → Image Prompts"
 )
+# ==========================================
+# 🎬 AI VIDEO GENERATOR
+# ==========================================
+
+import time
+import streamlit as st
+
+# Runway SDK
+try:
+    from runwayml import RunwayML, TaskFailedError
+    RUNWAY_AVAILABLE = True
+except ImportError:
+    RUNWAY_AVAILABLE = False
+
+
+# ==========================================
+# 🎬 VIDEO GENERATOR UI
+# ==========================================
+
+st.markdown("---")
+st.subheader("🎬 ဇာတ်ညွှန်းများမှ AI Video အော်တိုထုတ်လုပ်ခြင်း")
+
+
+# ==========================================
+# 1. VIDEO API PROVIDER
+# ==========================================
+
+video_provider = st.selectbox(
+    "🤖 Video API ရွေးပါ",
+    [
+        "Runway",
+        "Luma",
+        "Kling",
+    ],
+)
+
+
+# ==========================================
+# 2. API KEY
+# ==========================================
+
+video_api_key = st.text_input(
+    f"🔑 {video_provider} API Key",
+    type="password",
+)
+
+
+# ==========================================
+# 3. VIDEO INPUT MODE
+# ==========================================
+
+input_mode = st.radio(
+    "🎥 Video ထုတ်မည့်နည်း",
+    [
+        "Text → Video",
+        "Image → Video",
+    ],
+    horizontal=True,
+)
+
+
+# ==========================================
+# 4. IMAGE URL
+# ==========================================
+
+image_url = ""
+
+if input_mode == "Image → Video":
+
+    image_url = st.text_input(
+        "🖼️ Reference Image URL",
+        placeholder="https://example.com/scene1.jpg",
+    )
+
+    st.caption(
+        "Image → Video အတွက် HTTPS image URL ထည့်ပါ။"
+    )
+
+
+# ==========================================
+# 5. VIDEO PROMPTS
+# ==========================================
+
+videos_input_text = st.text_area(
+    "📝 Video Prompts များ",
+    placeholder=(
+        "Scene 1: A young woman walks through a Chinese-style courtyard, "
+        "cinematic camera movement, natural body movement.\n\n"
+        "Scene 2: A young man looks at her from across the courtyard, "
+        "emotional close-up, subtle camera movement."
+    ),
+    height=250,
+)
+
+
+# ==========================================
+# 6. VIDEO SETTINGS
+# ==========================================
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    aspect_ratio = st.selectbox(
+        "📱 Video Ratio",
+        [
+            "9:16",
+            "16:9",
+            "1:1",
+        ],
+    )
+
+
+with col2:
+
+    duration = st.selectbox(
+        "⏱️ Duration",
+        [
+            5,
+            10,
+        ],
+    )
+
+
+# ==========================================
+# 7. STYLE
+# ==========================================
+
+style = st.text_input(
+    "🎨 Video Style",
+    value=(
+        "cinematic Chinese drama style, "
+        "realistic characters, natural movement, "
+        "dramatic lighting, detailed environment, "
+        "smooth cinematic camera movement"
+    ),
+)
+
+
+# ==========================================
+# 8. RATIO CONVERTER
+# ==========================================
+
+def runway_ratio(ratio):
+
+    if ratio == "9:16":
+        return "720:1280"
+
+    elif ratio == "16:9":
+        return "1280:720"
+
+    else:
+        return "960:960"
+
+
+# ==========================================
+# 9. CLEAN PROMPTS
+# ==========================================
+
+def clean_video_prompts(text):
+
+    lines = text.split("\n")
+
+    prompts = []
+
+    for line in lines:
+
+        cleaned = line.strip()
+
+        if not cleaned:
+            continue
+
+        if cleaned.startswith("==="):
+            continue
+
+        if cleaned.startswith("---"):
+            continue
+
+        prompts.append(cleaned)
+
+    return prompts
+
+
+# ==========================================
+# 10. RUNWAY VIDEO GENERATOR
+# ==========================================
+
+def generate_runway_video(
+    api_key,
+    prompt,
+    ratio,
+    video_duration,
+    reference_image=None,
+):
+
+    if not RUNWAY_AVAILABLE:
+
+        raise RuntimeError(
+            "runwayml package မရှိသေးပါ။ "
+            "Replit မှာ runwayml package ထည့်ပေးပါ။"
+        )
+
+    try:
+
+        client = RunwayML(
+            api_key=api_key
+        )
+
+        # --------------------------------------
+        # Image → Video
+        # --------------------------------------
+
+        if reference_image:
+
+            task = client.image_to_video.create(
+                model="gen4.5",
+                prompt_image=reference_image,
+                prompt_text=prompt,
+                ratio=runway_ratio(ratio),
+                duration=video_duration,
+            ).wait_for_task_output()
+
+        # --------------------------------------
+        # Text → Video
+        # --------------------------------------
+
+        else:
+
+            task = client.image_to_video.create(
+                model="gen4.5",
+                prompt_text=prompt,
+                ratio=runway_ratio(ratio),
+                duration=video_duration,
+            ).wait_for_task_output()
+
+        # --------------------------------------
+        # Result
+        # --------------------------------------
+
+        if task.output:
+
+            return task.output[0]
+
+        raise RuntimeError(
+            "Video URL မရရှိသေးပါ။"
+        )
+
+    except TaskFailedError as e:
+
+        raise RuntimeError(
+            f"Runway Video Generation Failed: {e}"
+        )
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"Runway API Error: {e}"
+        )
+
+
+# ==========================================
+# 11. VIDEO GENERATE BUTTON
+# ==========================================
+
+if st.button(
+    "🚀 Video အားလုံးကို အော်တိုထုတ်မည်",
+    type="primary",
+):
+
+    # --------------------------------------
+    # API KEY CHECK
+    # --------------------------------------
+
+    if not video_api_key:
+
+        st.error(
+            f"❌ {video_provider} API Key ထည့်ပေးပါ။"
+        )
+
+    # --------------------------------------
+    # PROMPT CHECK
+    # --------------------------------------
+
+    elif not videos_input_text.strip():
+
+        st.error(
+            "❌ Video Prompt မရှိသေးပါ။"
+        )
+
+    # --------------------------------------
+    # IMAGE CHECK
+    # --------------------------------------
+
+    elif (
+        input_mode == "Image → Video"
+        and not image_url.strip()
+    ):
+
+        st.error(
+            "❌ Image → Video ရွေးထားတဲ့အတွက် "
+            "Reference Image URL ထည့်ပေးပါ။"
+        )
+
+    else:
+
+        prompts_list = clean_video_prompts(
+            videos_input_text
+        )
+
+        if not prompts_list:
+
+            st.warning(
+                "⚠️ Video Prompt မတွေ့ပါ။"
+            )
+
+        else:
+
+            total_videos = len(
+                prompts_list
+            )
+
+            st.info(
+                f"🎬 စုစုပေါင်း Scene "
+                f"{total_videos} ခုကို ထုတ်လုပ်မည်။"
+            )
+
+            progress_bar = st.progress(0)
+
+            status_text = st.empty()
+
+            generated_videos = []
+
+
+            # ==================================
+            # 🎬 AUTO VIDEO QUEUE
+            # ==================================
+
+            for index, prompt_text in enumerate(
+                prompts_list
+            ):
+
+                scene_number = index + 1
+
+                status_text.markdown(
+                    f"🔄 **Scene {scene_number} / "
+                    f"{total_videos}** ကို ထုတ်လုပ်နေပါပြီ..."
+                )
+
+
+                # ----------------------------------
+                # FINAL PROMPT
+                # ----------------------------------
+
+                final_prompt = (
+                    f"{style}. "
+                    f"{prompt_text}"
+                )
+
+
+                try:
+
+                    # ==================================
+                    # RUNWAY
+                    # ==================================
+
+                    if video_provider == "Runway":
+
+                        video_url = (
+                            generate_runway_video(
+                                api_key=video_api_key,
+                                prompt=final_prompt,
+                                ratio=aspect_ratio,
+                                video_duration=duration,
+                                reference_image=(
+                                    image_url
+                                    if input_mode
+                                    == "Image → Video"
+                                    else None
+                                ),
+                            )
+                        )
+
+
+                    # ==================================
+                    # LUMA
+                    # ==================================
+
+                    elif video_provider == "Luma":
+
+                        st.warning(
+                            "⚠️ Luma API adapter ကို "
+                            "ဒီ version မှာ မဖွင့်ထားသေးပါ။"
+                        )
+
+                        video_url = None
+
+
+                    # ==================================
+                    # KLING
+                    # ==================================
+
+                    elif video_provider == "Kling":
+
+                        st.warning(
+                            "⚠️ Kling API adapter ကို "
+                            "ဒီ version မှာ မဖွင့်ထားသေးပါ။"
+                        )
+
+                        video_url = None
+
+
+                    # ==================================
+                    # VIDEO SUCCESS
+                    # ==================================
+
+                    if video_url:
+
+                        generated_videos.append(
+                            {
+                                "scene": scene_number,
+                                "prompt": prompt_text,
+                                "url": video_url,
+                            }
+                        )
+
+                        st.success(
+                            f"✅ Scene {scene_number} "
+                            "Video ထွက်လာပါပြီ!"
+                        )
+
+                        st.video(
+                            video_url
+                        )
+
+                    else:
+
+                        st.warning(
+                            f"⚠️ Scene {scene_number} "
+                            "Video မရသေးပါ။"
+                        )
+
+
+                except Exception as e:
+
+                    st.error(
+                        f"❌ Scene {scene_number} "
+                        f"အမှားဖြစ်ပါတယ်:\n\n{e}"
+                    )
+
+
+                # ----------------------------------
+                # PROGRESS
+                # ----------------------------------
+
+                progress_bar.progress(
+                    (index + 1)
+                    / total_videos
+                )
+
+
+            # ==================================
+            # COMPLETE
+            # ==================================
+
+            if generated_videos:
+
+                st.success(
+                    f"🎉 {len(generated_videos)} ခု "
+                    "Video ထုတ်လုပ်ပြီးပါပြီ!"
+                )
+
+                st.markdown("---")
+
+                st.subheader(
+                    "📥 ထွက်လာသော Video များ"
+                )
+
+
+                for video in generated_videos:
+
+                    st.markdown(
+                        f"### 🎬 Scene "
+                        f"{video['scene']}"
+                    )
+
+                    st.video(
+                        video["url"]
+                    )
+
+                    st.markdown(
+                        f"[⬇️ Scene "
+                        f"{video['scene']} "
+                        f"Video Download]"
+                        f"({video['url']})"
+                    )
+
+            else:
+
+                st.warning(
+                    "⚠️ Video တစ်ခုမှ မထွက်သေးပါ။"
+                )

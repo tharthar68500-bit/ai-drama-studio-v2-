@@ -1352,7 +1352,7 @@ def generate_runway_video(
         if reference_image:
 
             task = client.image_to_video.create(
-                model="gen4.5",
+                model="gen3a_turbo"
                 prompt_image=reference_image,
                 prompt_text=prompt,
                 ratio=runway_ratio(ratio),

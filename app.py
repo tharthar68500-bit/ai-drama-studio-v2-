@@ -1,1130 +1,1845 @@
-import json
 import os
+import json
 import time
+import re
+import urllib.request
+import urllib.error
+
 import streamlit as st
+from gtts import gTTS
 from google import genai
+from google.genai import types
+
 
 # =========================================================
 # PAGE
 # =========================================================
 
 st.set_page_config(
-    page_title="AI Drama Story Generator",
+    page_title="AI Drama Studio",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("🎬 AI Drama Story Generator")
+st.title("🎬 AI Drama / Story Studio")
 
-st.write(
-    "ဇာတ်ကားတစ်ကားချင်းစီကို Notebook အဖြစ်သိမ်းပြီး "
-    "အတွဲလိုက် Scene၊ Dialogue နှင့် Image Prompt များကို ဖန်တီးနိုင်ပါသည်။"
+st.caption(
+    "Story → Character → Episode → Scene → Dialogue → Voice → Kling Video"
 )
-
-DATA_FILE = "drama_notebooks.json"
 
 
 # =========================================================
-# STORAGE
+# DATA
 # =========================================================
+
+DATA_FILE = "drama_data.json"
+OUTPUT_DIR = "generated_media"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
+
+    if os.path.exists(DATA_FILE):
+
+        try:
+            with open(
+                DATA_FILE,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                return json.load(f)
+
+        except Exception:
+            pass
+
+    return {
+        "notebooks": {
+            "ဇာတ်လမ်းအသစ် (Notebook 1)": {
+                "volume": 1,
+                "characters": [],
+                "episodes": {}
+            }
+        }
+    }
+
+
+def save_data():
+
+    with open(
+        DATA_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            st.session_state.data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+if "data" not in st.session_state:
+
+    st.session_state.data = load_data()
+
+
+# =========================================================
+# GEMINI HELPERS
+# =========================================================
+
+def get_client(api_key):
+
+    return genai.Client(
+        api_key=api_key.strip()
+    )
+
+
+def extract_json(text):
+
+    text = (text or "").strip()
+
+    if text.startswith("```"):
+
+        text = re.sub(
+            r"^```(?:json)?",
+            "",
+            text
+        ).strip()
+
+        text = re.sub(
+            r"```$",
+            "",
+            text
+        ).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start >= 0 and end >= 0:
+
+        return json.loads(
+            text[start:end + 1]
+        )
+
+    start = text.find("[")
+    end = text.rfind("]")
+
+    if start >= 0 and end >= 0:
+
+        return json.loads(
+            text[start:end + 1]
+        )
+
+    raise ValueError(
+        "AI response ထဲမှာ JSON မတွေ့ပါ"
+    )
+
+
+# =========================================================
+# GEMINI STORY GENERATOR
+# =========================================================
+
+def generate_story(
+    api_key,
+    model_name,
+    story,
+    scene_count,
+    language
+):
+
+    client = get_client(api_key)
+
+    existing_characters = (
+        st.session_state.current_nb
+        .get("characters", [])
+    )
+
+    character_text = json.dumps(
+        existing_characters,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    prompt = f"""
+You are an expert drama screenwriter and story continuity manager.
+
+Create one drama episode from the user's story idea.
+
+OUTPUT LANGUAGE:
+{language}
+
+NUMBER OF SCENES:
+{scene_count}
+
+EXISTING CHARACTER DATABASE:
+{character_text}
+
+IMPORTANT:
+
+1. Keep existing character names consistent.
+2. Keep age, personality, appearance and clothing consistent.
+3. Keep relationships consistent.
+4. If a new character appears, add the character.
+5. Each scene must connect naturally to the previous scene.
+6. Dialogue must be natural and suitable for voice generation.
+7. Image Prompt must describe the exact characters in the scene.
+8. Video Prompt must describe:
+   - character action
+   - facial expression
+   - emotion
+   - camera movement
+   - environment
+   - lighting
+   - cinematic style
+9. Video Prompt should be suitable for Kling AI.
+10. Image Prompt and Video Prompt should be written in English.
+11. Dialogue and voice_text must use the selected output language.
+12. Return ONLY valid JSON.
+
+JSON FORMAT:
+
+{{
+  "characters": [
+    {{
+      "name": "",
+      "age": "",
+      "gender": "",
+      "personality": "",
+      "appearance": "",
+      "clothing": "",
+      "relationship": ""
+    }}
+  ],
+
+  "scenes": [
+
+    {{
+      "scene": 1,
+      "location": "",
+      "time": "",
+      "characters": [],
+      "action": "",
+
+      "dialogue": [
+
+        {{
+          "character": "",
+          "text": ""
+        }}
+
+      ],
+
+      "voice_text": "",
+
+      "image_prompt": "",
+
+      "video_prompt": ""
+
+    }}
+
+  ]
+}}
+
+USER STORY:
+
+{story}
+"""
+
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt
+    )
+
+    return extract_json(
+        response.text
+    )
+
+
+# =========================================================
+# VOICE
+# =========================================================
+
+def generate_voice(
+    text,
+    filename
+):
+
+    path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
+
+    tts = gTTS(
+        text=text,
+        lang="my"
+    )
+
+    tts.save(path)
+
+    return path
+
+
+# =========================================================
+# KLING API
+# =========================================================
+
+KLING_BASE_URL = (
+    "https://api-singapore.klingai.com"
+)
+
+
+def kling_request(
+    method,
+    endpoint,
+    api_key,
+    payload=None
+):
+
+    url = (
+        KLING_BASE_URL
+        + endpoint
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {api_key.strip()}",
+        "Content-Type":
+            "application/json"
+    }
+
+    data = None
+
+    if payload is not None:
+
+        data = json.dumps(
+            payload,
+            ensure_ascii=False
+        ).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method
+    )
 
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+
+        with urllib.request.urlopen(
+            request,
+            timeout=60
+        ) as response:
+
+            raw = response.read().decode(
+                "utf-8"
+            )
+
+            return json.loads(raw)
+
+    except urllib.error.HTTPError as e:
+
+        body = e.read().decode(
+            "utf-8",
+            errors="replace"
+        )
+
+        raise RuntimeError(
+            f"Kling API HTTP {e.code}: {body}"
+        )
+
+    except urllib.error.URLError as e:
+
+        raise RuntimeError(
+            f"Kling API Connection Error: {e}"
+        )
 
 
-def save_data(data):
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                data,
-                f,
+# =========================================================
+# CREATE KLING TASK
+# =========================================================
+
+def create_kling_video(
+    api_key,
+    prompt,
+    duration,
+    aspect_ratio,
+    model_name,
+    mode,
+    sound
+):
+
+    duration = int(duration)
+
+    # Kling currently supports 3-15 seconds.
+    if duration < 3:
+
+        raise ValueError(
+            "Kling API မှာ 1 second မရသေးပါ။ "
+            "5 seconds သို့မဟုတ် 10 seconds ကိုရွေးပါ။"
+        )
+
+    if duration > 15:
+
+        raise ValueError(
+            "Kling API duration maximum က 15 seconds ဖြစ်ပါတယ်။"
+        )
+
+    payload = {
+
+        "model_name":
+            model_name,
+
+        "prompt":
+            prompt[:2500],
+
+        "negative_prompt":
+            "",
+
+        "duration":
+            str(duration),
+
+        "mode":
+            mode,
+
+        "sound":
+            sound,
+
+        "aspect_ratio":
+            aspect_ratio,
+
+        "callback_url":
+            "",
+
+        "external_task_id":
+            ""
+    }
+
+    result = kling_request(
+        "POST",
+        "/v1/videos/text2video",
+        api_key,
+        payload
+    )
+
+    code = result.get(
+        "code"
+    )
+
+    if code not in (0, None):
+
+        raise RuntimeError(
+            "Kling Task Create Error: "
+            + str(
+                result.get(
+                    "message",
+                    result
+                )
+            )
+        )
+
+    data = result.get(
+        "data"
+    ) or {}
+
+    task_id = data.get(
+        "task_id"
+    )
+
+    if not task_id:
+
+        raise RuntimeError(
+            "Kling Task ID မရပါ။\n\n"
+            + json.dumps(
+                result,
                 ensure_ascii=False,
                 indent=2
             )
-    except Exception as e:
-        st.error(f"Data save error: {e}")
-
-
-# =========================================================
-# API CALL WITH RETRY
-# =========================================================
-
-def generate_with_retry(client, prompt, max_attempts=3):
-
-    last_error = None
-
-    for attempt in range(max_attempts):
-
-        try:
-
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt
-            )
-
-            if not response.text:
-                raise Exception(
-                    "Gemini က စာပြန်မပေးပါ။"
-                )
-
-            return response.text
-
-        except Exception as e:
-
-            last_error = e
-            error_text = str(e)
-
-            # 503 / temporary unavailable
-            if (
-                "503" in error_text
-                or "UNAVAILABLE" in error_text
-                or "high demand" in error_text.lower()
-            ):
-
-                if attempt < max_attempts - 1:
-
-                    wait_time = 5 * (attempt + 1)
-
-                    st.warning(
-                        f"⏳ Gemini server busy ဖြစ်နေပါတယ်။ "
-                        f"{wait_time} စက္ကန့်စောင့်ပြီး "
-                        f"ပြန်ကြိုးစားပါမယ်... "
-                        f"({attempt + 1}/{max_attempts})"
-                    )
-
-                    time.sleep(wait_time)
-
-                    continue
-
-            raise e
-
-    raise last_error
-
-
-# =========================================================
-# PARSE SCENES
-# =========================================================
-
-def parse_scenes(result):
-
-    scenes = {}
-
-    lines = result.splitlines()
-
-    current_scene = None
-    current_content = []
-
-    for line in lines:
-
-        stripped = line.strip()
-
-        if stripped.startswith("===== SCENE "):
-
-            if current_scene is not None:
-
-                scenes[str(current_scene)] = (
-                    "\n".join(current_content).strip()
-                )
-
-            number_text = (
-                stripped
-                .replace("===== SCENE ", "")
-                .replace(" =====", "")
-                .strip()
-            )
-
-            try:
-
-                current_scene = int(number_text)
-                current_content = []
-
-            except ValueError:
-
-                current_scene = None
-                current_content = []
-
-        elif current_scene is not None:
-
-            if stripped.startswith(
-                "===== NEXT VOLUME CONTINUITY ====="
-            ):
-
-                break
-
-            current_content.append(line)
-
-    if current_scene is not None:
-
-        scenes[str(current_scene)] = (
-            "\n".join(current_content).strip()
         )
 
-    return scenes
+    return task_id
 
 
 # =========================================================
-# CONTINUITY
+# CHECK KLING TASK
 # =========================================================
 
-def get_continuity(result):
+def get_kling_video(
+    api_key,
+    task_id
+):
 
-    marker = "===== NEXT VOLUME CONTINUITY ====="
-
-    if marker in result:
-
-        return result.split(
-            marker,
-            1
-        )[1].strip()
-
-    return ""
-
-
-# =========================================================
-# SESSION
-# =========================================================
-
-if "notebooks" not in st.session_state:
-    st.session_state.notebooks = load_data()
-
-if "current_notebook" not in st.session_state:
-    st.session_state.current_notebook = ""
-
-if "new_notebook" not in st.session_state:
-    st.session_state.new_notebook = False
-
-
-# =========================================================
-# NOTEBOOK CREATION
-# =========================================================
-
-def create_notebook(name):
-
-    name = name.strip()
-
-    if not name:
-        return False, "Notebook အမည်ထည့်ပါ။"
-
-    if name in st.session_state.notebooks:
-        return False, "ဒီ Notebook နာမည် ရှိပြီးသားပါ။"
-
-    st.session_state.notebooks[name] = {
-        "story": "",
-        "characters": "",
-        "language": "မြန်မာ (Burmese)",
-        "custom_language": "",
-        "scenes_per_volume": 150,
-        "current_volume": 1,
-        "last_scene": 0,
-        "continuity": "",
-        "volumes": {}
-    }
-
-    save_data(
-        st.session_state.notebooks
+    result = kling_request(
+        "GET",
+        f"/v1/videos/text2video/{task_id}",
+        api_key
     )
 
-    st.session_state.current_notebook = name
+    data = result.get(
+        "data"
+    ) or {}
 
-    return True, "Notebook အသစ် ဖန်တီးပြီးပါပြီ။"
+    status = data.get(
+        "task_status"
+    )
+
+    return status, data, result
 
 
 # =========================================================
-# SIDEBAR - NOTEBOOKS
+# WAIT KLING VIDEO
 # =========================================================
 
-st.sidebar.header("📓 Drama Notebooks")
+def wait_for_kling_video(
+    api_key,
+    task_id
+):
 
-notebook_names = list(
-    st.session_state.notebooks.keys()
+    started = time.time()
+
+    timeout_seconds = 900
+
+    progress = st.progress(0)
+
+    status_box = st.empty()
+
+    while True:
+
+        if (
+            time.time()
+            - started
+            > timeout_seconds
+        ):
+
+            raise TimeoutError(
+                "Kling Video generation timeout ဖြစ်သွားပါပြီ။"
+            )
+
+        status, data, result = get_kling_video(
+            api_key,
+            task_id
+        )
+
+        if status == "succeed":
+
+            progress.progress(100)
+
+            status_box.success(
+                "✅ Kling Video ပြီးပါပြီ။"
+            )
+
+            task_result = (
+                data.get(
+                    "task_result"
+                )
+                or {}
+            )
+
+            videos = (
+                task_result.get(
+                    "videos"
+                )
+                or []
+            )
+
+            if not videos:
+
+                raise RuntimeError(
+                    "Kling Video URL မရပါ။\n\n"
+                    + json.dumps(
+                        result,
+                        ensure_ascii=False,
+                        indent=2
+                    )
+                )
+
+            video = videos[0]
+
+            video_url = (
+                video.get("url")
+                or
+                video.get("watermark_url")
+            )
+
+            if not video_url:
+
+                raise RuntimeError(
+                    "Kling Video URL မတွေ့ပါ။"
+                )
+
+            return video_url
+
+        if status == "failed":
+
+            message = (
+                data.get(
+                    "task_status_msg"
+                )
+                or
+                result.get(
+                    "message"
+                )
+                or
+                "Unknown error"
+            )
+
+            raise RuntimeError(
+                f"Kling Video Failed: {message}"
+            )
+
+        elapsed = int(
+            time.time()
+            - started
+        )
+
+        progress.progress(
+            min(
+                95,
+                5 + int(
+                    elapsed / 8
+                )
+            )
+        )
+
+        status_box.info(
+            "🎬 Kling Video ထုတ်နေပါတယ်... "
+            f"{status or 'processing'} "
+            f"({elapsed}s)"
+        )
+
+        time.sleep(8)
+
+
+# =========================================================
+# KLING VIDEO GENERATOR
+# =========================================================
+
+def generate_kling_video(
+    api_key,
+    prompt,
+    duration,
+    aspect_ratio,
+    model_name,
+    mode,
+    sound
+):
+
+    task_id = create_kling_video(
+        api_key=api_key,
+        prompt=prompt,
+        duration=duration,
+        aspect_ratio=aspect_ratio,
+        model_name=model_name,
+        mode=mode,
+        sound=sound
+    )
+
+    return wait_for_kling_video(
+        api_key,
+        task_id
+    )
+
+
+# =========================================================
+# GEMINI VEO
+# =========================================================
+
+def generate_veo_video(
+    api_key,
+    video_model,
+    prompt,
+    filename,
+    aspect_ratio
+):
+
+    client = get_client(
+        api_key
+    )
+
+    operation = (
+        client.models.generate_videos(
+            model=video_model,
+            prompt=prompt,
+            config=types.GenerateVideosConfig(
+                aspect_ratio=aspect_ratio,
+                resolution="720p",
+                number_of_videos=1
+            )
+        )
+    )
+
+    progress = st.empty()
+
+    while not operation.done:
+
+        progress.info(
+            "🎬 Gemini Veo Video ထုတ်နေပါတယ်..."
+        )
+
+        time.sleep(10)
+
+        operation = (
+            client.operations.get(
+                operation
+            )
+        )
+
+    progress.empty()
+
+    generated_videos = (
+        getattr(
+            operation.response,
+            "generated_videos",
+            None
+        )
+        or []
+    )
+
+    if not generated_videos:
+
+        raise RuntimeError(
+            "Veo က Video result မပြန်ပေးပါ။"
+        )
+
+    generated_video = (
+        generated_videos[0]
+    )
+
+    path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
+
+    client.files.download(
+        file=generated_video.video,
+        destination=path
+    )
+
+    return path
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+
+st.sidebar.header(
+    "🔑 API Settings"
 )
 
-if notebook_names:
 
-    current_index = 0
+# ---------------------------------------------------------
+# GEMINI
+# ---------------------------------------------------------
 
-    if (
-        st.session_state.current_notebook
-        in notebook_names
-    ):
-        current_index = notebook_names.index(
-            st.session_state.current_notebook
-        )
+st.sidebar.subheader(
+    "🟢 Gemini"
+)
 
-    selected_notebook = st.sidebar.selectbox(
-        "ရှိပြီးသား ဇာတ်ကား",
-        notebook_names,
-        index=current_index
+gemini_api_key = st.sidebar.text_input(
+    "Gemini API Key",
+    type="password"
+)
+
+gemini_model = st.sidebar.selectbox(
+    "🧠 Story Model",
+    [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.1-pro-preview"
+    ]
+)
+
+gemini_video_model = st.sidebar.selectbox(
+    "🎬 Gemini Video Model",
+    [
+        "veo-3.1-generate-preview",
+        "veo-3.1-lite-generate-preview"
+    ]
+)
+
+gemini_ratio_label = (
+    st.sidebar.selectbox(
+        "📐 Gemini Video Ratio",
+        [
+            "16:9 — Landscape",
+            "9:16 — Portrait"
+        ],
+        index=0
     )
+)
+
+gemini_aspect_ratio = (
+    "16:9"
+    if gemini_ratio_label.startswith("16:9")
+    else "9:16"
+)
+
+
+# ---------------------------------------------------------
+# KLING
+# ---------------------------------------------------------
+
+st.sidebar.markdown("---")
+
+st.sidebar.subheader(
+    "🟣 Kling API"
+)
+
+kling_api_key = st.sidebar.text_input(
+    "Kling API Key",
+    type="password",
+    help="Kling Developer Platform မှ ရသော API Key"
+)
+
+kling_model = st.sidebar.selectbox(
+    "Kling Video Model",
+    [
+        "kling-v3",
+        "kling-v2-6"
+    ]
+)
+
+kling_mode = st.sidebar.selectbox(
+    "Kling Quality",
+    [
+        "std",
+        "pro"
+    ]
+)
+
+kling_sound = st.sidebar.selectbox(
+    "Kling Sound",
+    [
+        "off",
+        "on"
+    ]
+)
+
+kling_default_ratio = st.sidebar.selectbox(
+    "Kling Video Ratio",
+    [
+        "9:16",
+        "16:9"
+    ]
+)
+
+st.sidebar.info(
+    "Gemini = Story / Dialogue\n\n"
+    "Kling = Video"
+)
+
+
+# =========================================================
+# NOTEBOOK
+# =========================================================
+
+st.sidebar.markdown("---")
+
+st.sidebar.header(
+    "📁 Notebooks"
+)
+
+notebook_names = list(
+    st.session_state.data[
+        "notebooks"
+    ].keys()
+)
+
+selected_notebook = (
+    st.sidebar.selectbox(
+        "Notebook ရွေးပါ",
+        notebook_names
+    )
+)
+
+new_notebook = (
+    st.sidebar.text_input(
+        "➕ Notebook အသစ်"
+    )
+)
+
+if st.sidebar.button(
+    "Notebook ဖန်တီးမည်"
+):
 
     if (
-        selected_notebook
-        != st.session_state.current_notebook
+        new_notebook
+        and
+        new_notebook
+        not in st.session_state.data[
+            "notebooks"
+        ]
     ):
 
-        st.session_state.current_notebook = (
-            selected_notebook
-        )
+        st.session_state.data[
+            "notebooks"
+        ][new_notebook] = {
+
+            "volume": 1,
+
+            "characters": [],
+
+            "episodes": {}
+        }
+
+        save_data()
 
         st.rerun()
 
-else:
 
-    st.sidebar.info(
-        "Notebook မရှိသေးပါ။"
-    )
-
-
-if st.sidebar.button(
-    "➕ New Notebook",
-    use_container_width=True
-):
-
-    st.session_state.new_notebook = True
-
-
-# =========================================================
-# NEW NOTEBOOK
-# =========================================================
-
-if st.session_state.new_notebook:
-
-    st.subheader("📓 ဇာတ်ကားအသစ်")
-
-    new_name = st.text_input(
-        "ဇာတ်ကား / Notebook အမည်",
-        placeholder="ဥပမာ - မာနကြီးသောမင်းသမီး"
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        if st.button(
-            "✅ ဖန်တီးမည်",
-            use_container_width=True
-        ):
-
-            success, message = create_notebook(
-                new_name
-            )
-
-            if success:
-
-                st.session_state.new_notebook = False
-
-                st.success(message)
-
-                st.rerun()
-
-            else:
-
-                st.error(message)
-
-    with c2:
-
-        if st.button(
-            "❌ Cancel",
-            use_container_width=True
-        ):
-
-            st.session_state.new_notebook = False
-
-            st.rerun()
-
-
-# =========================================================
-# CURRENT NOTEBOOK
-# =========================================================
-
-if not st.session_state.current_notebook:
-
-    st.info(
-        "📓 ဘယ်ဘက်က **New Notebook** ကိုနှိပ်ပြီး "
-        "ဇာတ်ကားအသစ် စတင်ပါ။"
-    )
-
-    st.stop()
-
-
-notebook = st.session_state.notebooks[
-    st.session_state.current_notebook
-]
-
-
-# =========================================================
-# GEMINI API
-# =========================================================
-
-st.sidebar.markdown("---")
-
-st.sidebar.subheader("⚙️ Gemini Settings")
-
-api_key = st.sidebar.text_input(
-    "Gemini API Key",
-    type="password",
-    placeholder="AIza..."
+st.session_state.current_nb = (
+    st.session_state.data[
+        "notebooks"
+    ][selected_notebook]
 )
 
-st.sidebar.caption(
-    "API Key ကို ဒီနေရာမှာသာ ထည့်ပါ။"
+current_nb = (
+    st.session_state.current_nb
 )
 
 
 # =========================================================
-# LANGUAGE
+# MAIN HEADER
 # =========================================================
-
-st.sidebar.markdown("---")
-
-st.sidebar.subheader("🌐 Output Language")
-
-languages = [
-    "မြန်မာ (Burmese)",
-    "中文 (Chinese)",
-    "English",
-    "ไทย (Thai)",
-    "Other"
-]
-
-saved_language = notebook.get(
-    "language",
-    "မြန်မာ (Burmese)"
-)
-
-if saved_language not in languages:
-    saved_language = "မြန်မာ (Burmese)"
-
-language = st.sidebar.selectbox(
-    "ဇာတ်လမ်း / Dialogue ဘာသာစကား",
-    languages,
-    index=languages.index(
-        saved_language
-    )
-)
-
-custom_language = notebook.get(
-    "custom_language",
-    ""
-)
-
-if language == "Other":
-
-    custom_language = st.sidebar.text_input(
-        "ဘာသာစကား",
-        value=custom_language,
-        placeholder="ဥပမာ - Korean"
-    )
-
-
-if language == "မြန်မာ (Burmese)":
-
-    output_language = "Burmese (Myanmar language)"
-
-elif language == "中文 (Chinese)":
-
-    output_language = "Chinese (Simplified Chinese)"
-
-elif language == "English":
-
-    output_language = "English"
-
-elif language == "ไทย (Thai)":
-
-    output_language = "Thai"
-
-else:
-
-    output_language = (
-        custom_language.strip()
-        if custom_language.strip()
-        else "the language specified by the user"
-    )
-
-
-# =========================================================
-# NOTEBOOK TITLE
-# =========================================================
-
-st.header(
-    f"📓 {st.session_state.current_notebook}"
-)
-
-st.caption(
-    "ဒီ Notebook က ဒီဇာတ်ကားအတွက် သီးသန့်ဖြစ်ပါတယ်။"
-)
-
-
-# =========================================================
-# STORY
-# =========================================================
-
-st.subheader("📖 ဇာတ်လမ်းအကြမ်း")
-
-story = st.text_area(
-    "ဇာတ်လမ်းအကြမ်း",
-    value=notebook.get("story", ""),
-    height=220,
-    placeholder="""ဥပမာ -
-
-မင်းသမီးက ချမ်းသာပြီး မာနကြီးတယ်။
-မင်းသားက ဆင်းရဲပေမယ့် ရိုးသားတယ်။
-အစပိုင်းမှာ မင်းသမီးက မင်းသားကို အထင်သေးတယ်။
-နောက်ပိုင်းမှာ သူ့ရဲ့ စိတ်ကောင်းကို သိလာပြီး ချစ်မိသွားတယ်။"""
-)
-
-
-# =========================================================
-# CHARACTERS
-# =========================================================
-
-st.subheader("👥 Character Information")
-
-characters = st.text_area(
-    "ဇာတ်ကောင်အချက်အလက်",
-    value=notebook.get("characters", ""),
-    height=180,
-    placeholder="""မင်းသမီး - မေသဇင်၊ အသက် ၂၃၊ ချမ်းသာ၊ မာနကြီး
-မင်းသား - အောင်ခန့်၊ အသက် ၂၅၊ ဆင်းရဲသော်လည်း ရိုးသား
-မင်းသမီးအဖေ - ဦးထွန်း
-မင်းသမီးအမေ - ဒေါ်သီတာ"""
-)
-
-
-# =========================================================
-# SCENE COUNT
-# =========================================================
-
-scene_options = list(
-    range(5, 151, 5)
-)
-
-saved_scene_count = notebook.get(
-    "scenes_per_volume",
-    150
-)
-
-if saved_scene_count not in scene_options:
-    saved_scene_count = 150
-
-scene_count = st.selectbox(
-    "🎬 အတွဲတစ်တွဲမှာ Scene",
-    scene_options,
-    index=scene_options.index(
-        saved_scene_count
-    )
-)
-
-st.caption(
-    "ရွေးချယ်နိုင်သည် — "
-    "5, 10, 15, 20 ... 150"
-)
-
-
-# =========================================================
-# SAVE USER INPUT
-# =========================================================
-
-notebook["story"] = story
-notebook["characters"] = characters
-notebook["language"] = language
-notebook["custom_language"] = custom_language
-notebook["scenes_per_volume"] = scene_count
-
-save_data(
-    st.session_state.notebooks
-)
-
-
-# =========================================================
-# CURRENT VOLUME
-# =========================================================
-
-current_volume = notebook.get(
-    "current_volume",
-    1
-)
-
-last_scene = notebook.get(
-    "last_scene",
-    0
-)
-
-st.markdown("---")
 
 st.subheader(
-    f"📚 အတွဲ {current_volume}"
-)
-
-st.info(
-    f"နောက်ထုတ်မည့် Scene သည် "
-    f"Scene {last_scene + 1} မှ "
-    f"Scene {last_scene + scene_count} အထိ ဖြစ်မည်။"
+    f"📖 {selected_notebook} "
+    f"— Episode {current_nb['volume']}"
 )
 
 
 # =========================================================
-# GENERATE CURRENT VOLUME
+# TABS
 # =========================================================
 
-if st.button(
-    f"🚀 အတွဲ {current_volume} "
-    f"Scene {last_scene + 1}–"
-    f"{last_scene + scene_count} ထုတ်မည်",
-    use_container_width=True
-):
-
-    if not api_key.strip():
-
-        st.error(
-            "❌ Gemini API Key ထည့်ပါ။"
-        )
-
-    elif not story.strip():
-
-        st.error(
-            "❌ ဇာတ်လမ်းအကြမ်း ထည့်ပါ။"
-        )
-
-    elif (
-        language == "Other"
-        and not custom_language.strip()
-    ):
-
-        st.error(
-            "❌ Other ဘာသာစကားအမည်ထည့်ပါ။"
-        )
-
-    else:
-
-        first_scene = last_scene + 1
-        final_scene = (
-            last_scene + scene_count
-        )
-
-        client = genai.Client(
-            api_key=api_key.strip()
-        )
-
-        prompt = f"""
-You are a professional long-form drama writer.
-
-Create Volume {current_volume}.
-
-SCENE RANGE:
-Scene {first_scene} to Scene {final_scene}
-
-TOTAL NEW SCENES:
-{scene_count}
-
-OUTPUT LANGUAGE:
-{output_language}
-
-ORIGINAL STORY:
-{story}
-
-CHARACTER INFORMATION:
-{characters}
-
-PREVIOUS CONTINUITY:
-{notebook.get("continuity", "")}
-
-IMPORTANT RULES:
-
-1. Write exactly Scene {first_scene} through Scene {final_scene}.
-2. Do NOT restart scene numbering.
-3. Continue directly from the previous volume.
-4. Keep all character appearances consistent.
-5. Keep personality consistent.
-6. Keep relationships consistent.
-7. Keep story continuity.
-8. Every scene must move the story forward.
-9. Dialogue must be in {output_language}.
-10. Scene Description must be in {output_language}.
-11. Character information must be in {output_language}.
-12. Image Prompt must be in English.
-13. Image Prompt must contain cinematic vertical 9:16.
-14. Do not put dialogue inside Image Prompt.
-15. Do not finish the entire story too early.
-
-USE THIS FORMAT:
-
-===== VOLUME {current_volume} =====
-
-Volume Title:
-...
-
-Volume Summary:
-...
-
-===== SCENE {first_scene} =====
-
-Scene Description:
-...
-
-Characters:
-...
-
-Dialogue:
-
-Character Name:
-"..."
-
-Character Name:
-"..."
-
-Image Prompt:
-Detailed cinematic vertical 9:16 image prompt in English.
-
-Continue until:
-
-===== SCENE {final_scene} =====
-
-Then:
-
-===== NEXT VOLUME CONTINUITY =====
-
-Include:
-- Character emotional states
-- Relationships
-- Important events
-- Unresolved conflicts
-- Important locations
-- Important objects
-- What should happen next
-"""
-
-        try:
-
-            with st.spinner(
-                f"⏳ Scene {first_scene}–"
-                f"{final_scene} ရေးနေပါပြီ..."
-            ):
-
-                result = generate_with_retry(
-                    client,
-                    prompt
-                )
-
-            scenes = parse_scenes(
-                result
-            )
-
-            continuity = get_continuity(
-                result
-            )
-
-            notebook["volumes"][
-                str(current_volume)
-            ] = {
-                "first_scene": first_scene,
-                "last_scene": final_scene,
-                "scene_count": scene_count,
-                "scenes": scenes,
-                "result": result,
-                "continuity": continuity
-            }
-
-            notebook["continuity"] = continuity
-
-            notebook["last_scene"] = final_scene
-
-            save_data(
-                st.session_state.notebooks
-            )
-
-            st.success(
-                f"✅ အတွဲ {current_volume} "
-                f"Scene {first_scene}–{final_scene} "
-                "ပြီးပါပြီ။"
-            )
-
-            st.rerun()
-
-        except Exception as e:
-
-            st.error(
-                "❌ Gemini API Error"
-            )
-
-            st.code(
-                str(e),
-                language="text"
-            )
-
-
-# =========================================================
-# CURRENT VOLUME DISPLAY
-# =========================================================
-
-volumes = notebook.get(
-    "volumes",
-    {}
-)
-
-if str(current_volume) in volumes:
-
-    volume_data = volumes[
-        str(current_volume)
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "✍️ Story",
+        "👥 Characters",
+        "🎬 Scenes",
+        "🎙️ Voice / Video"
     ]
+)
 
-    scenes = volume_data.get(
-        "scenes",
-        {}
+
+# =========================================================
+# STORY TAB
+# =========================================================
+
+with tab1:
+
+    story_input = st.text_area(
+        "✍️ ဇာတ်လမ်းအကြမ်း",
+        height=220,
+        placeholder=(
+            "ဥပမာ - ချမ်းသာတဲ့ မိန်းကလေးတစ်ယောက်က "
+            "ဆင်းရဲတဲ့ ယောကျ်ားလေးကို အစပိုင်းမှာ "
+            "အထင်သေးပေမယ့်..."
+        )
     )
 
-    scene_numbers = sorted(
-        [int(x) for x in scenes.keys()]
-    )
+    col1, col2 = st.columns(2)
 
-    st.markdown("---")
+    with col1:
 
-    st.subheader(
-        f"🎬 အတွဲ {current_volume} "
-        f"— Scene {len(scene_numbers)} ခန်း"
-    )
+        scene_count = st.selectbox(
+            "Scene အရေအတွက်",
+            [
+                5,
+                10,
+                15,
+                30,
+                50
+            ],
+            index=1
+        )
 
-    # 5 scenes per group
-    for start in range(
-        0,
-        len(scene_numbers),
-        5
-    ):
+    with col2:
 
-        group = scene_numbers[
-            start:start + 5
-        ]
-
-        first = group[0]
-        last = group[-1]
-
-        group_text = ""
-
-        for number in group:
-
-            group_text += (
-                f"===== SCENE {number} =====\n\n"
-                f"{scenes[str(number)]}\n\n"
+        output_language = (
+            st.selectbox(
+                "Dialogue Language",
+                [
+                    "မြန်မာ",
+                    "English",
+                    "中文",
+                    "ไทย"
+                ]
             )
-
-        st.markdown(
-            f"### 📦 Scene {first} – {last}"
         )
 
-        # Streamlit automatically provides Copy
-        st.code(
-            group_text,
-            language="text"
-        )
-
-
-# =========================================================
-# VOLUME HISTORY
-# =========================================================
-
-if volumes:
-
-    st.markdown("---")
-
-    st.subheader("📚 အတွဲမှတ်တမ်း")
-
-    volume_numbers = sorted(
-        [int(x) for x in volumes.keys()]
-    )
-
-    selected_volume = st.selectbox(
-        "ကြည့်မည့်အတွဲ",
-        volume_numbers,
-        index=len(volume_numbers) - 1
-    )
-
-    selected_data = volumes[
-        str(selected_volume)
-    ]
-
-    selected_scenes = selected_data.get(
-        "scenes",
-        {}
-    )
-
-    selected_numbers = sorted(
-        [int(x) for x in selected_scenes.keys()]
-    )
-
-    for start in range(
-        0,
-        len(selected_numbers),
-        5
-    ):
-
-        group = selected_numbers[
-            start:start + 5
-        ]
-
-        group_text = ""
-
-        for number in group:
-
-            group_text += (
-                f"===== SCENE {number} =====\n\n"
-                f"{selected_scenes[str(number)]}\n\n"
-            )
-
-        st.code(
-            group_text,
-            language="text"
-        )
-
-
-# =========================================================
-# NEXT VOLUME
-# =========================================================
-
-if str(current_volume) in volumes:
-
-    st.markdown("---")
-
-    next_volume = current_volume + 1
-
-    next_first_scene = (
-        notebook.get("last_scene", 0) + 1
-    )
-
-    next_last_scene = (
-        next_first_scene + scene_count - 1
-    )
-
-    st.subheader(
-        "📚 ဇာတ်လမ်းဆက်ရန်"
-    )
-
-    st.caption(
-        f"အတွဲ {next_volume} → "
-        f"Scene {next_first_scene}–"
-        f"{next_last_scene}"
-    )
 
     if st.button(
-        f"📚 အတွဲ {next_volume} ဆက်လက်ထုတ်ရန်",
+        "🚀 AI ဇာတ်လမ်း + Scene + Dialogue ထုတ်မည်",
+        type="primary",
         use_container_width=True
     ):
 
-        if not api_key.strip():
+        if not gemini_api_key:
 
             st.error(
-                "❌ Gemini API Key ထည့်ပါ။"
+                "Gemini API Key ထည့်ပါ။"
+            )
+
+        elif not story_input.strip():
+
+            st.error(
+                "ဇာတ်လမ်းအကြမ်းထည့်ပါ။"
             )
 
         else:
 
-            client = genai.Client(
-                api_key=api_key.strip()
-            )
-
-            first_scene = (
-                notebook.get("last_scene", 0) + 1
-            )
-
-            final_scene = (
-                first_scene + scene_count - 1
-            )
-
-            prompt = f"""
-Continue the drama story.
-
-PREVIOUS VOLUME:
-Volume {current_volume}
-
-NEW VOLUME:
-Volume {next_volume}
-
-NEW SCENE RANGE:
-Scene {first_scene} to Scene {final_scene}
-
-OUTPUT LANGUAGE:
-{output_language}
-
-ORIGINAL STORY:
-{notebook.get("story", "")}
-
-CHARACTER INFORMATION:
-{notebook.get("characters", "")}
-
-PREVIOUS CONTINUITY:
-{notebook.get("continuity", "")}
-
-RULES:
-
-1. Continue directly from the previous volume.
-2. Scene numbering MUST continue from Scene {first_scene}.
-3. Write exactly Scene {first_scene} through Scene {final_scene}.
-4. Do not restart at Scene 1.
-5. Keep character appearance consistent.
-6. Keep personality consistent.
-7. Keep relationships consistent.
-8. Continue unresolved conflicts naturally.
-9. Dialogue must be in {output_language}.
-10. Scene Description must be in {output_language}.
-11. Character information must be in {output_language}.
-12. Image Prompt must be English.
-13. Image Prompt must contain cinematic vertical 9:16.
-14. Every scene must move the story forward.
-
-USE EXACT FORMAT:
-
-===== VOLUME {next_volume} =====
-
-Volume Title:
-...
-
-Volume Summary:
-...
-
-===== SCENE {first_scene} =====
-
-Scene Description:
-...
-
-Characters:
-...
-
-Dialogue:
-
-Character Name:
-"..."
-
-Character Name:
-"..."
-
-Image Prompt:
-Detailed cinematic vertical 9:16 image prompt in English.
-
-Continue until:
-
-===== SCENE {final_scene} =====
-
-Then:
-
-===== NEXT VOLUME CONTINUITY =====
-
-Write the information required for the next volume.
-"""
-
             try:
 
                 with st.spinner(
-                    f"⏳ အတွဲ {next_volume} "
-                    f"Scene {first_scene}–"
-                    f"{final_scene} ရေးနေပါပြီ..."
+                    "🤖 Gemini က ဇာတ်လမ်းတည်ဆောက်နေပါတယ်..."
                 ):
 
-                    result = generate_with_retry(
-                        client,
-                        prompt
+                    result = generate_story(
+                        gemini_api_key,
+                        gemini_model,
+                        story_input,
+                        scene_count,
+                        output_language
                     )
 
-                scenes = parse_scenes(
-                    result
+
+                # -----------------------------------------
+                # CHARACTER DATABASE UPDATE
+                # -----------------------------------------
+
+                for character in (
+                    result.get(
+                        "characters",
+                        []
+                    )
+                ):
+
+                    old = next(
+                        (
+                            c
+                            for c
+                            in current_nb[
+                                "characters"
+                            ]
+                            if c.get(
+                                "name"
+                            )
+                            ==
+                            character.get(
+                                "name"
+                            )
+                        ),
+                        None
+                    )
+
+                    if old:
+
+                        old.update(
+                            character
+                        )
+
+                    else:
+
+                        current_nb[
+                            "characters"
+                        ].append(
+                            character
+                        )
+
+
+                # -----------------------------------------
+                # SAVE EPISODE
+                # -----------------------------------------
+
+                episode_number = (
+                    current_nb[
+                        "volume"
+                    ]
                 )
 
-                continuity = get_continuity(
-                    result
-                )
-
-                notebook["volumes"][
-                    str(next_volume)
+                current_nb[
+                    "episodes"
+                ][
+                    str(episode_number)
                 ] = {
-                    "first_scene": first_scene,
-                    "last_scene": final_scene,
-                    "scene_count": scene_count,
-                    "scenes": scenes,
-                    "result": result,
-                    "continuity": continuity
+
+                    "story_input":
+                        story_input,
+
+                    "scenes":
+                        result.get(
+                            "scenes",
+                            []
+                        )
                 }
 
-                notebook["continuity"] = continuity
-
-                notebook["current_volume"] = (
-                    next_volume
-                )
-
-                notebook["last_scene"] = (
-                    final_scene
-                )
-
-                save_data(
-                    st.session_state.notebooks
-                )
+                save_data()
 
                 st.success(
-                    f"✅ အတွဲ {next_volume} "
-                    f"Scene {first_scene}–"
-                    f"{final_scene} ပြီးပါပြီ။"
+                    f"✅ Episode {episode_number} "
+                    f"အတွက် "
+                    f"{len(result.get('scenes', []))} "
+                    f"Scenes ထွက်ပါပြီ။"
                 )
-
-                st.rerun()
 
             except Exception as e:
 
                 st.error(
-                    "❌ အတွဲဆက်တဲ့အချိန် "
-                    "Gemini API Error ဖြစ်ပါတယ်။"
+                    f"❌ Gemini Error: {e}"
+                )
+
+
+    if st.button(
+        "📚 Episode အသစ်သို့ ဆက်မည်"
+    ):
+
+        current_nb[
+            "volume"
+        ] += 1
+
+        save_data()
+
+        st.success(
+            f"Episode "
+            f"{current_nb['volume']} "
+            f"သို့ ပြောင်းပြီးပါပြီ။"
+        )
+
+        st.rerun()
+
+
+# =========================================================
+# CHARACTER TAB
+# =========================================================
+
+with tab2:
+
+    st.subheader(
+        "👥 Character Database"
+    )
+
+    if not current_nb[
+        "characters"
+    ]:
+
+        st.info(
+            "Character မရှိသေးပါ။ "
+            "Story Generate လုပ်ပါ။"
+        )
+
+    else:
+
+        for character in (
+            current_nb[
+                "characters"
+            ]
+        ):
+
+            with st.expander(
+                "👤 "
+                +
+                character.get(
+                    "name",
+                    "Unknown"
+                )
+            ):
+
+                st.write(
+                    "**အသက်:** "
+                    + str(
+                        character.get(
+                            "age",
+                            ""
+                        )
+                    )
+                )
+
+                st.write(
+                    "**Gender:** "
+                    + str(
+                        character.get(
+                            "gender",
+                            ""
+                        )
+                    )
+                )
+
+                st.write(
+                    "**Personality:** "
+                    + str(
+                        character.get(
+                            "personality",
+                            ""
+                        )
+                    )
+                )
+
+                st.write(
+                    "**Appearance:** "
+                    + str(
+                        character.get(
+                            "appearance",
+                            ""
+                        )
+                    )
+                )
+
+                st.write(
+                    "**Clothing:** "
+                    + str(
+                        character.get(
+                            "clothing",
+                            ""
+                        )
+                    )
+                )
+
+                st.write(
+                    "**Relationship:** "
+                    + str(
+                        character.get(
+                            "relationship",
+                            ""
+                        )
+                    )
+                )
+
+
+# =========================================================
+# SCENES TAB
+# =========================================================
+
+with tab3:
+
+    episode_key = str(
+        current_nb[
+            "volume"
+        ]
+    )
+
+    episode = (
+        current_nb[
+            "episodes"
+        ].get(
+            episode_key
+        )
+    )
+
+    if not episode:
+
+        st.info(
+            "အရင်ဆုံး Story Generate လုပ်ပါ။"
+        )
+
+    else:
+
+        st.subheader(
+            f"🎬 Episode {episode_key} "
+            f"— "
+            f"{len(episode['scenes'])} Scenes"
+        )
+
+        for scene in (
+            episode[
+                "scenes"
+            ]
+        ):
+
+            scene_no = scene.get(
+                "scene",
+                "?"
+            )
+
+            with st.expander(
+                f"🎬 Scene {scene_no}"
+            ):
+
+                st.write(
+                    "📍 **Location:**",
+                    scene.get(
+                        "location",
+                        ""
+                    )
+                )
+
+                st.write(
+                    "🕐 **Time:**",
+                    scene.get(
+                        "time",
+                        ""
+                    )
+                )
+
+                st.write(
+                    "🎭 **Action:**",
+                    scene.get(
+                        "action",
+                        ""
+                    )
+                )
+
+                st.markdown(
+                    "### 💬 Dialogue"
+                )
+
+                for d in (
+                    scene.get(
+                        "dialogue",
+                        []
+                    )
+                ):
+
+                    st.markdown(
+                        f"**{d.get('character', '')}:** "
+                        f"{d.get('text', '')}"
+                    )
+
+                st.markdown(
+                    "### 🖼️ Image Prompt"
                 )
 
                 st.code(
-                    str(e),
+                    scene.get(
+                        "image_prompt",
+                        ""
+                    ),
+                    language="text"
+                )
+
+                st.markdown(
+                    "### 🎥 Video Prompt"
+                )
+
+                st.code(
+                    scene.get(
+                        "video_prompt",
+                        ""
+                    ),
+                    language="text"
+                )
+
+                st.markdown(
+                    "### 🎙️ Voice Text"
+                )
+
+                st.code(
+                    scene.get(
+                        "voice_text",
+                        ""
+                    ),
                     language="text"
                 )
 
 
 # =========================================================
-# CHARACTER MEMORY
+# VOICE / VIDEO TAB
 # =========================================================
 
-if notebook.get("characters"):
+with tab4:
 
-    st.sidebar.markdown("---")
-
-    st.sidebar.subheader(
-        "👥 Character Memory"
+    episode_key = str(
+        current_nb[
+            "volume"
+        ]
     )
 
-    st.sidebar.text_area(
-        "သိမ်းထားသော Character Information",
-        value=notebook.get(
-            "characters",
-            ""
-        ),
-        height=250,
-        disabled=True
+    episode = (
+        current_nb[
+            "episodes"
+        ].get(
+            episode_key
+        )
     )
 
+    if not episode:
 
-# =========================================================
-# CONTINUITY
-# =========================================================
+        st.info(
+            "အရင်ဆုံး Story Generate လုပ်ပါ။"
+        )
 
-if notebook.get("continuity"):
+    else:
 
-    st.markdown("---")
+        st.subheader(
+            "🎙️ Voice / 🎬 Video"
+        )
 
-    with st.expander(
-        "🔗 နောက်အတွဲ Continuity"
-    ):
+        # =================================================
+        # IMPORTANT:
+        # ONLY ONE SCENE IS SELECTED
+        # =================================================
 
-        st.write(
-            notebook.get(
-                "continuity",
-                ""
+        scene_numbers = [
+            s.get(
+                "scene"
+            )
+            for s in episode[
+                "scenes"
+            ]
+        ]
+
+        selected_scene = (
+            st.selectbox(
+                "🎬 Video ထုတ်မယ့် Scene တစ်ခုရွေးပါ",
+                scene_numbers
             )
         )
+
+        scene = next(
+            s
+            for s in episode[
+                "scenes"
+            ]
+            if s.get(
+                "scene"
+            )
+            ==
+            selected_scene
+        )
+
+
+        st.info(
+            f"🎬 အခု Scene {selected_scene} "
+            "တစ်ခန်းတည်းကိုပဲ Video API ဆီပို့ပါမယ်။ "
+            "Scene အားလုံးကို အလိုအလျောက် မထုတ်ပါ။"
+        )
+
+
+        # =================================================
+        # IMAGE PROMPT
+        # =================================================
+
+        st.markdown(
+            "### 🖼️ Image Prompt"
+        )
+
+        image_prompt = st.text_area(
+            "Image Prompt",
+            value=scene.get(
+                "image_prompt",
+                ""
+            ),
+            height=180,
+            key=f"image_prompt_{selected_scene}"
+        )
+
+
+        # =================================================
+        # VIDEO PROMPT
+        # =================================================
+
+        st.markdown(
+            "### 🎥 Video Prompt"
+        )
+
+        video_prompt = st.text_area(
+            "Video Prompt",
+            value=scene.get(
+                "video_prompt",
+                ""
+            ),
+            height=220,
+            key=f"video_prompt_{selected_scene}"
+        )
+
+
+        # =================================================
+        # VOICE
+        # =================================================
+
+        st.markdown(
+            "### 🎙️ Voice Text"
+        )
+
+        edited_voice = st.text_area(
+            "အသံထွက်မယ့်စာသား",
+            value=scene.get(
+                "voice_text",
+                ""
+            ),
+            height=150,
+            key=f"voice_text_{selected_scene}"
+        )
+
+
+        if st.button(
+            "🔊 ဒီ Scene အတွက် MP3 ထုတ်မည်",
+            use_container_width=True
+        ):
+
+            if not edited_voice.strip():
+
+                st.error(
+                    "Voice Text မရှိပါ။"
+                )
+
+            else:
+
+                try:
+
+                    filename = (
+                        f"episode_"
+                        f"{current_nb['volume']}"
+                        f"_scene_"
+                        f"{selected_scene}"
+                        f"_voice.mp3"
+                    )
+
+                    with st.spinner(
+                        "🎙️ Voice ထုတ်နေပါတယ်..."
+                    ):
+
+                        audio_path = (
+                            generate_voice(
+                                edited_voice,
+                                filename
+                            )
+                        )
+
+                    st.success(
+                        "✅ MP3 ထွက်ပါပြီ။"
+                    )
+
+                    st.audio(
+                        audio_path,
+                        format="audio/mp3"
+                    )
+
+                except Exception as e:
+
+                    st.error(
+                        f"❌ Voice Error: {e}"
+                    )
+
+
+        # =================================================
+        # KLING VIDEO
+        # =================================================
+
+        st.markdown("---")
+
+        st.markdown(
+            "## 🟣 Kling API Video"
+        )
+
+
+        kling_duration = (
+            st.selectbox(
+                "⏱️ Duration",
+                [
+                    1,
+                    5,
+                    10
+                ],
+                index=1,
+                key=f"kling_duration_{selected_scene}"
+            )
+        )
+
+
+        if kling_duration == 1:
+
+            st.warning(
+                "⚠️ 1 second ကို UI မှာ ထည့်ပေးထားပါတယ်။ "
+                "ဒါပေမယ့် Kling API က လက်ရှိ "
+                "3–15 seconds ကိုပဲ လက်ခံပါတယ်။ "
+                "Kling Video ထုတ်ဖို့ 5 သို့ 10 ကိုရွေးပါ။"
+            )
+
+
+        kling_ratio = (
+            st.selectbox(
+                "📱 Video Ratio",
+                [
+                    "9:16",
+                    "16:9"
+                ],
+                index=(
+                    0
+                    if kling_default_ratio
+                    == "9:16"
+                    else 1
+                ),
+                key=f"kling_ratio_{selected_scene}"
+            )
+        )
+
+
+        kling_sound_scene = (
+            st.selectbox(
+                "🔊 Kling Native Sound",
+                [
+                    "off",
+                    "on"
+                ],
+                index=(
+                    0
+                    if kling_sound
+                    == "off"
+                    else 1
+                ),
+                key=f"kling_sound_{selected_scene}"
+            )
+        )
+
+
+        # =================================================
+        # KLING BUTTON
+        # =================================================
+
+        if st.button(
+            "🚀 ဒီ Scene တစ်ခုတည်းကို Kling နဲ့ Video ထုတ်မည်",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if not kling_api_key.strip():
+
+                st.error(
+                    "❌ Kling API Key မထည့်ရသေးပါ။ "
+                    "Sidebar → Kling API Key မှာ ထည့်ပါ။"
+                )
+
+            elif not video_prompt.strip():
+
+                st.error(
+                    "❌ Video Prompt မရှိပါ။"
+                )
+
+            elif kling_duration == 1:
+
+                st.error(
+                    "❌ Kling API မှာ 1 second မရသေးပါ။ "
+                    "5 seconds ကိုရွေးပါ။"
+                )
+
+            else:
+
+                try:
+
+                    # Save edited prompts
+                    scene[
+                        "image_prompt"
+                    ] = image_prompt
+
+                    scene[
+                        "video_prompt"
+                    ] = video_prompt
+
+                    scene[
+                        "voice_text"
+                    ] = edited_voice
+
+                    save_data()
+
+
+                    # -------------------------------------
+                    # ONLY ONE SCENE IS SENT
+                    # -------------------------------------
+
+                    with st.spinner(
+                        f"🎬 Scene {selected_scene} "
+                        "တစ်ခန်းတည်းကို Kling ဆီပို့နေပါတယ်..."
+                    ):
+
+                        video_url = (
+                            generate_kling_video(
+                                api_key=kling_api_key,
+                                prompt=video_prompt,
+                                duration=kling_duration,
+                                aspect_ratio=kling_ratio,
+                                model_name=kling_model,
+                                mode=kling_mode,
+                                sound=kling_sound_scene
+                            )
+                        )
+
+
+                    if not video_url:
+
+                        raise RuntimeError(
+                            "Kling က Video URL မပြန်ပေးပါ။"
+                        )
+
+
+                    # -------------------------------------
+                    # SAVE KLING RESULT
+                    # -------------------------------------
+
+                    if (
+                        "video_results"
+                        not in scene
+                    ):
+
+                        scene[
+                            "video_results"
+                        ] = {}
+
+
+                    scene[
+                        "video_results"
+                    ][
+                        "kling"
+                    ] = video_url
+
+
+                    scene[
+                        "video_results"
+                    ][
+                        "kling_duration"
+                    ] = kling_duration
+
+
+                    scene[
+                        "video_results"
+                    ][
+                        "kling_ratio"
+                    ] = kling_ratio
+
+
+                    save_data()
+
+
+                    st.success(
+                        f"✅ Scene {selected_scene} "
+                        "Kling Video အောင်မြင်ပါပြီ။"
+                    )
+
+
+                    st.markdown(
+                        "### 🎞️ Kling Video"
+                    )
+
+                    st.video(
+                        video_url
+                    )
+
+
+                except Exception as e:
+
+                    st.error(
+                        "❌ Kling Video Error"
+                    )
+
+                    st.code(
+                        str(e),
+                        language="text"
+                    )
+
+
+        # =================================================
+        # OLD KLING RESULT
+        # =================================================
+
+        saved_results = (
+            scene.get(
+                "video_results",
+                {}
+            )
+        )
+
+        if isinstance(
+            saved_results,
+            dict
+        ):
+
+            saved_kling_url = (
+                saved_results.get(
+                    "kling"
+                )
+            )
+
+            if saved_kling_url:
+
+                st.markdown(
+                    "### 🎞️ နောက်ဆုံး Kling Video"
+                )
+
+                st.video(
+                    saved_kling_url
+                )
+
+
+        # =================================================
+        # GEMINI VEO OPTIONAL
+        # =================================================
+
+        st.markdown("---")
+
+        st.markdown(
+            "## 🟢 Gemini Veo Video (Optional)"
+        )
+
+        veo_prompt = st.text_area(
+            "Veo Video Prompt",
+            value=scene.get(
+                "video_prompt",
+                ""
+            ),
+            height=180,
+            key=f"veo_prompt_{selected_scene}"
+        )
+
+
+        if st.button(
+            "🎬 Gemini Veo နဲ့ Video ထုတ်မည်",
+            use_container_width=True
+        ):
+
+            if not gemini_api_key.strip():
+
+                st.error(
+                    "Gemini API Key ထည့်ပါ။"
+                )
+
+            elif not veo_prompt.strip():
+
+                st.error(
+                    "Veo Video Prompt မရှိပါ။"
+                )
+
+            else:
+
+                try:
+
+                    filename = (
+                        f"episode_"
+                        f"{current_nb['volume']}"
+                        f"_scene_"
+                        f"{selected_scene}"
+                        f"_veo.mp4"
+                    )
+
+                    with st.spinner(
+                        "🎬 Gemini Veo Video ထုတ်နေပါတယ်..."
+                    ):
+
+                        veo_path = (
+                            generate_veo_video(
+                                gemini_api_key,
+                                gemini_video_model,
+                                veo_prompt,
+                                filename,
+                                gemini_aspect_ratio
+                            )
+                        )
+
+                    st.success(
+                        "✅ Gemini Veo Video ပြီးပါပြီ။"
+                    )
+
+                    st.video(
+                        veo_path
+                    )
+
+                except Exception as e:
+
+                    st.error(
+                        "❌ Veo Video Error\n\n"
+                        + str(e)
+                    )
 
 
 # =========================================================
@@ -1133,508 +1848,10 @@ if notebook.get("continuity"):
 
 st.markdown("---")
 
-st.caption(
-    "🎬 Stage 1 — "
-    "Notebook → Story → Volume → Scenes → Dialogue → Image Prompts"
+st.info(
+    "💡 Video Button ကိုနှိပ်တဲ့အခါ "
+    "ရွေးထားတဲ့ Scene တစ်ခန်းတည်းကိုသာ "
+    "Kling API ဆီပို့ပါတယ်။ "
+    "Scene 8 ခန်းရှိလို့ Video 8 ခု အလိုအလျောက် "
+    "ထုတ်မှာမဟုတ်ပါ။"
 )
-# ==========================================
-# 🎬 AI VIDEO GENERATOR
-# ==========================================
-
-import time
-import streamlit as st
-
-# Runway SDK
-try:
-    from runwayml import RunwayML, TaskFailedError
-    RUNWAY_AVAILABLE = True
-except ImportError:
-    RUNWAY_AVAILABLE = False
-
-
-# ==========================================
-# 🎬 VIDEO GENERATOR UI
-# ==========================================
-
-st.markdown("---")
-st.subheader("🎬 ဇာတ်ညွှန်းများမှ AI Video အော်တိုထုတ်လုပ်ခြင်း")
-
-
-# ==========================================
-# 1. VIDEO API PROVIDER
-# ==========================================
-
-video_provider = st.selectbox(
-    "🤖 Video API ရွေးပါ",
-    [
-        "Runway",
-        "Luma",
-        "Kling",
-    ],
-)
-
-
-# ==========================================
-# 2. API KEY
-# ==========================================
-
-video_api_key = st.text_input(
-    f"🔑 {video_provider} API Key",
-    type="password",
-)
-
-
-# ==========================================
-# 3. VIDEO INPUT MODE
-# ==========================================
-
-input_mode = st.radio(
-    "🎥 Video ထုတ်မည့်နည်း",
-    [
-        "Text → Video",
-        "Image → Video",
-    ],
-    horizontal=True,
-)
-
-
-# ==========================================
-# 4. IMAGE URL
-# ==========================================
-
-image_url = ""
-
-if input_mode == "Image → Video":
-
-    image_url = st.text_input(
-        "🖼️ Reference Image URL",
-        placeholder="https://example.com/scene1.jpg",
-    )
-
-    st.caption(
-        "Image → Video အတွက် HTTPS image URL ထည့်ပါ။"
-    )
-
-
-# ==========================================
-# 5. VIDEO PROMPTS
-# ==========================================
-
-videos_input_text = st.text_area(
-    "📝 Video Prompts များ",
-    placeholder=(
-        "Scene 1: A young woman walks through a Chinese-style courtyard, "
-        "cinematic camera movement, natural body movement.\n\n"
-        "Scene 2: A young man looks at her from across the courtyard, "
-        "emotional close-up, subtle camera movement."
-    ),
-    height=250,
-)
-
-
-# ==========================================
-# 6. VIDEO SETTINGS
-# ==========================================
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    aspect_ratio = st.selectbox(
-        "📱 Video Ratio",
-        [
-            "9:16",
-            "16:9",
-            "1:1",
-        ],
-    )
-
-
-with col2:
-
-    duration = st.selectbox(
-        "⏱️ Duration",
-        [
-            5,
-            10,
-        ],
-    )
-
-
-# ==========================================
-# 7. STYLE
-# ==========================================
-
-style = st.text_input(
-    "🎨 Video Style",
-    value=(
-        "cinematic Chinese drama style, "
-        "realistic characters, natural movement, "
-        "dramatic lighting, detailed environment, "
-        "smooth cinematic camera movement"
-    ),
-)
-
-
-# ==========================================
-# 8. RATIO CONVERTER
-# ==========================================
-
-def runway_ratio(ratio):
-
-    if ratio == "9:16":
-        return "720:1280"
-
-    elif ratio == "16:9":
-        return "1280:720"
-
-    else:
-        return "960:960"
-
-
-# ==========================================
-# 9. CLEAN PROMPTS
-# ==========================================
-
-def clean_video_prompts(text):
-
-    lines = text.split("\n")
-
-    prompts = []
-
-    for line in lines:
-
-        cleaned = line.strip()
-
-        if not cleaned:
-            continue
-
-        if cleaned.startswith("==="):
-            continue
-
-        if cleaned.startswith("---"):
-            continue
-
-        prompts.append(cleaned)
-
-    return prompts
-
-
-# ==========================================
-# 10. RUNWAY VIDEO GENERATOR
-# ==========================================
-
-def generate_runway_video(
-    api_key,
-    prompt,
-    ratio,
-    video_duration,
-    reference_image=None,
-):
-
-    if not RUNWAY_AVAILABLE:
-
-        raise RuntimeError(
-            "runwayml package မရှိသေးပါ။ "
-            "Replit မှာ runwayml package ထည့်ပေးပါ။"
-        )
-
-    try:
-
-        client = RunwayML(
-            api_key=api_key
-        )
-
-        # --------------------------------------
-        # Image → Video
-        # --------------------------------------
-
-        if reference_image:
-
-            task = client.image_to_video.create(
-                model="gen4.5_turbo",
-                prompt_image=reference_image,
-                prompt_text=prompt,
-                ratio=runway_ratio(ratio),
-                duration=int(video_duration),
-            ).wait_for_task_output()
-
-        # --------------------------------------
-        # Text → Video
-        # --------------------------------------
-
-        else:
-
-            task = client.text_to_video.create(
-                model="gen4.5_turbo",
-                prompt_text=prompt,
-                ratio=runway_ratio(ratio),
-                duration=int(video_duration),
-            ).wait_for_task_output()
-
-        # --------------------------------------
-        # Result
-        # --------------------------------------
-
-        if task.output:
-
-            return task.output[0]
-
-        raise RuntimeError(
-            "Video URL မရရှိသေးပါ။"
-        )
-
-    except TaskFailedError as e:
-
-        raise RuntimeError(
-            f"Runway Video Generation Failed: {e}"
-        )
-
-    except Exception as e:
-
-        raise RuntimeError(
-            f"Runway API Error: {e}"
-        )
-
-
-# ==========================================
-# 11. VIDEO GENERATE BUTTON
-# ==========================================
-
-if st.button(
-    "🚀 Video အားလုံးကို အော်တိုထုတ်မည်",
-    type="primary",
-):
-
-    # --------------------------------------
-    # API KEY CHECK
-    # --------------------------------------
-
-    if not video_api_key:
-
-        st.error(
-            f"❌ {video_provider} API Key ထည့်ပေးပါ။"
-        )
-
-    # --------------------------------------
-    # PROMPT CHECK
-    # --------------------------------------
-
-    elif not videos_input_text.strip():
-
-        st.error(
-            "❌ Video Prompt မရှိသေးပါ။"
-        )
-
-    # --------------------------------------
-    # IMAGE CHECK
-    # --------------------------------------
-
-    elif (
-        input_mode == "Image → Video"
-        and not image_url.strip()
-    ):
-
-        st.error(
-            "❌ Image → Video ရွေးထားတဲ့အတွက် "
-            "Reference Image URL ထည့်ပေးပါ။"
-        )
-
-    else:
-
-        prompts_list = clean_video_prompts(
-            videos_input_text
-        )
-
-        if not prompts_list:
-
-            st.warning(
-                "⚠️ Video Prompt မတွေ့ပါ။"
-            )
-
-        else:
-
-            total_videos = len(
-                prompts_list
-            )
-
-            st.info(
-                f"🎬 စုစုပေါင်း Scene "
-                f"{total_videos} ခုကို ထုတ်လုပ်မည်။"
-            )
-
-            progress_bar = st.progress(0)
-
-            status_text = st.empty()
-
-            generated_videos = []
-
-
-            # ==================================
-            # 🎬 AUTO VIDEO QUEUE
-            # ==================================
-
-            for index, prompt_text in enumerate(
-                prompts_list
-            ):
-
-                scene_number = index + 1
-
-                status_text.markdown(
-                    f"🔄 **Scene {scene_number} / "
-                    f"{total_videos}** ကို ထုတ်လုပ်နေပါပြီ..."
-                )
-
-
-                # ----------------------------------
-                # FINAL PROMPT
-                # ----------------------------------
-
-                final_prompt = (
-                    f"{style}. "
-                    f"{prompt_text}"
-                )
-
-
-                try:
-
-                    # ==================================
-                    # RUNWAY
-                    # ==================================
-
-                    if video_provider == "Runway":
-
-                        video_url = (
-                            generate_runway_video(
-                                api_key=video_api_key,
-                                prompt=final_prompt,
-                                ratio=aspect_ratio,
-                                video_duration=duration,
-                                reference_image=(
-                                    image_url
-                                    if input_mode
-                                    == "Image → Video"
-                                    else None
-                                ),
-                            )
-                        )
-
-
-                    # ==================================
-                    # LUMA
-                    # ==================================
-
-                    elif video_provider == "Luma":
-
-                        st.warning(
-                            "⚠️ Luma API adapter ကို "
-                            "ဒီ version မှာ မဖွင့်ထားသေးပါ။"
-                        )
-
-                        video_url = None
-
-
-                    # ==================================
-                    # KLING
-                    # ==================================
-
-                    elif video_provider == "Kling":
-
-                        st.warning(
-                            "⚠️ Kling API adapter ကို "
-                            "ဒီ version မှာ မဖွင့်ထားသေးပါ။"
-                        )
-
-                        video_url = None
-
-
-                    # ==================================
-                    # VIDEO SUCCESS
-                    # ==================================
-
-                    if video_url:
-
-                        generated_videos.append(
-                            {
-                                "scene": scene_number,
-                                "prompt": prompt_text,
-                                "url": video_url,
-                            }
-                        )
-
-                        st.success(
-                            f"✅ Scene {scene_number} "
-                            "Video ထွက်လာပါပြီ!"
-                        )
-
-                        st.video(
-                            video_url
-                        )
-
-                    else:
-
-                        st.warning(
-                            f"⚠️ Scene {scene_number} "
-                            "Video မရသေးပါ။"
-                        )
-
-
-                except Exception as e:
-
-                    st.error(
-                        f"❌ Scene {scene_number} "
-                        f"အမှားဖြစ်ပါတယ်:\n\n{e}"
-                    )
-
-
-                # ----------------------------------
-                # PROGRESS
-                # ----------------------------------
-
-                progress_bar.progress(
-                    (index + 1)
-                    / total_videos
-                )
-
-
-            # ==================================
-            # COMPLETE
-            # ==================================
-
-            if generated_videos:
-
-                st.success(
-                    f"🎉 {len(generated_videos)} ခု "
-                    "Video ထုတ်လုပ်ပြီးပါပြီ!"
-                )
-
-                st.markdown("---")
-
-                st.subheader(
-                    "📥 ထွက်လာသော Video များ"
-                )
-
-
-                for video in generated_videos:
-
-                    st.markdown(
-                        f"### 🎬 Scene "
-                        f"{video['scene']}"
-                    )
-
-                    st.video(
-                        video["url"]
-                    )
-
-                    st.markdown(
-                        f"[⬇️ Scene "
-                        f"{video['scene']} "
-                        f"Video Download]"
-                        f"({video['url']})"
-                    )
-
-            else:
-
-                st.warning(
-                    "⚠️ Video တစ်ခုမှ မထွက်သေးပါ။"
-                )
